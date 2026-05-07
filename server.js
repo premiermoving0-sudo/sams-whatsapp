@@ -155,6 +155,19 @@ app.post('/send', async (req, res) => {
     }
 });
 
+// Force reconnect / generate QR
+app.get('/connect', (req, res) => {
+    if (connectionStatus === 'connected') {
+        return res.json({ status: 'already_connected' });
+    }
+    // Reset and reconnect
+    if (sock) { try { sock.end(); } catch(e) {} sock = null; }
+    connectionStatus = 'disconnected';
+    currentQR = null;
+    connectWhatsApp();
+    res.json({ status: 'connecting', message: 'QR generating... check /status in 10 seconds' });
+});
+
 // Disconnect
 app.post('/disconnect', (req, res) => {
     if (sock) { sock.logout(); sock = null; }
