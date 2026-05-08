@@ -2,7 +2,6 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import express from "express";
@@ -19,8 +18,6 @@ app.use(express.json());
 
 const httpServer = createServer(app);
 const io = new SocketIO(httpServer, { cors: { origin: "*" } });
-
-const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
 
 let sock = null;
 let qrData = null;
