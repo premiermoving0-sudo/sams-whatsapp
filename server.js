@@ -1,145 +1,245 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
-import { Boom } from '@hapi/boom';
-import express from 'express';
-import cors from 'cors';
-import { createServer } from 'http';
-import { Server } from 'socket.io';
-import qrcode from 'qrcode';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import fs from 'fs';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  makeInMemoryStore,
+} from "@whiskeysockets/baileys";
+import { Boom } from "@hapi/boom";
+import express from "express";
+import cors from "cors";
+import qrcode from "qrcode";
+import { createServer } from "http";
+import { Server as SocketIO } from "socket.io";
+import pino from "pino";
+import fs from "fs";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
-});
+const io = new SocketIO(httpServer, { cors: { origin: "*" } });
+
+const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
 
 let sock = null;
-let qrImageBase64 = null;
-let status = 'disconnected'; // disconnected | connecting | qr | connected
+let qrData = null;
+let connectionStatus = "disconnected"; // disconnected | connecting | connected
 
-const AUTH_FOLDER = './auth_info_baileys';
+const AUTH_DIR = "./auth_info";
 
-async function connectWhatsApp() {
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
-    const { version } = await fetchLatestBaileysVersion();
+async function connectWA() {
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version } = await fetchLatestBaileysVersion();
 
-    sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: true,
-      browser: ['SAMs Salon', 'Chrome', '1.0.0'],
-    });
+  sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: "silent" }),
+    printQRInTerminal: false,
+    browser: ["SAMS Server", "Chrome", "3.0"],
+    store,
+  });
 
-    status = 'connecting';
-    io.emit('status', { status });
+  store.bind(sock.ev);
 
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+  sock.ev.on("creds.update", saveCreds);
 
-      if (qr) {
-        status = 'qr';
-        qrImageBase64 = await qrcode.toDataURL(qr);
-        io.emit('qr', { qr: qrImageBase64 });
-        io.emit('status', { status: 'qr' });
-        console.log('QR Code generated');
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      qrData = await qrcode.toDataURL(qr);
+      connectionStatus = "qr";
+      io.emit("qr", qrData);
+      io.emit("status", "qr");
+      console.log("QR code generated");
+    }
+
+    if (connection === "close") {
+      qrData = null;
+      const shouldReconnect =
+        lastDisconnect?.error instanceof Boom &&
+        lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut;
+      console.log("Connection closed. Reconnect:", shouldReconnect);
+      connectionStatus = "disconnected";
+      io.emit("status", "disconnected");
+      if (shouldReconnect) {
+        setTimeout(connectWA, 3000);
       }
+    }
 
-      if (connection === 'close') {
-        const shouldReconnect =
-          (lastDisconnect?.error instanceof Boom)
-            ? lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
-            : true;
-
-        console.log('Connection closed. Reconnect:', shouldReconnect);
-        status = 'disconnected';
-        qrImageBase64 = null;
-        io.emit('status', { status: 'disconnected' });
-
-        if (shouldReconnect) {
-          setTimeout(connectWhatsApp, 3000);
-        }
-      }
-
-      if (connection === 'open') {
-        console.log('WhatsApp connected!');
-        status = 'connected';
-        qrImageBase64 = null;
-        io.emit('status', { status: 'connected' });
-      }
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-  } catch (err) {
-    console.error('connectWhatsApp error:', err);
-    status = 'disconnected';
-    setTimeout(connectWhatsApp, 5000);
-  }
+    if (connection === "open") {
+      qrData = null;
+      connectionStatus = "connected";
+      io.emit("status", "connected");
+      console.log("WhatsApp connected!");
+    }
+  });
 }
 
-// Routes
-app.get('/status', (req, res) => {
-  res.json({ status, qr: qrImageBase64 });
+// ── Helper: send a WhatsApp message ──────────────────────────
+async function sendMessage(phone, message) {
+  if (!sock || connectionStatus !== "connected") {
+    throw new Error("WhatsApp not connected");
+  }
+  // Normalize phone number → 92XXXXXXXXXX@s.whatsapp.net
+  let num = phone.replace(/\D/g, "");
+  if (num.startsWith("0")) num = "92" + num.slice(1);
+  if (!num.startsWith("92")) num = "92" + num;
+  const jid = num + "@s.whatsapp.net";
+  await sock.sendMessage(jid, { text: message });
+  console.log(`Message sent to ${jid}`);
+}
+
+// ── Routes ───────────────────────────────────────────────────
+
+app.get("/status", (req, res) => {
+  if (connectionStatus === "qr" && qrData) {
+    return res.json({ status: "qr", qr: qrData });
+  }
+  res.json({ status: connectionStatus });
 });
 
-app.get('/connect', (req, res) => {
-  if (status === 'disconnected') {
-    connectWhatsApp();
-    res.json({ message: 'Connecting...' });
-  } else {
-    res.json({ message: `Already ${status}` });
-  }
-});
-
-app.post('/disconnect', async (req, res) => {
-  if (sock) {
-    await sock.logout();
-    sock = null;
-  }
-  // Delete auth files so fresh QR shows
-  if (fs.existsSync(AUTH_FOLDER)) {
-    fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
-  }
-  status = 'disconnected';
-  qrImageBase64 = null;
-  io.emit('status', { status: 'disconnected' });
-  res.json({ message: 'Disconnected' });
-});
-
-app.post('/send-message', async (req, res) => {
+// Send single message (used by frontend waApi.send)
+app.post("/send", async (req, res) => {
   const { phone, message } = req.body;
-  if (!sock || status !== 'connected') {
-    return res.status(503).json({ error: 'WhatsApp not connected' });
-  }
+  if (!phone || !message) return res.status(400).json({ error: "phone and message required" });
   try {
-    const jid = phone.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
-    await sock.sendMessage(jid, { text: message });
+    await sendMessage(phone, message);
     res.json({ success: true });
-  } catch (err) {
-    console.error('Send error:', err);
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    console.error("Send error:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
-io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
-  socket.emit('status', { status });
-  if (qrImageBase64) {
-    socket.emit('qr', { qr: qrImageBase64 });
+// Called by PHP backend index.php notifyWA()
+app.post("/send-notification", async (req, res) => {
+  const { type, data } = req.body;
+  if (!type || !data) return res.status(400).json({ error: "type and data required" });
+
+  try {
+    if (type === "new_order") {
+      // Notify admin
+      const adminPhone = process.env.ADMIN_PHONE;
+      const shopName = process.env.SHOP_NAME || "Sam's Skin Care";
+      const baseUrl = process.env.BASE_URL || "https://sams.g0vi.pk";
+
+      const items = Array.isArray(data.items)
+        ? data.items.map(i => `• ${i.product_name} x${i.qty} = Rs ${i.total}`).join("\n")
+        : "—";
+      const trackLink = `${baseUrl}/track-order?order=${data.order_number}`;
+
+      const adminMsg =
+        `🛍️ *New Order - ${shopName}*\n\n` +
+        `📦 Order: *${data.order_number}*\n` +
+        `👤 ${data.customer_name}\n` +
+        `📱 ${data.customer_phone}\n` +
+        `🏙️ ${data.customer_city || "—"}\n` +
+        `📍 ${data.customer_address || "—"}\n\n` +
+        `${items}\n\n` +
+        `💰 *Total: Rs ${parseFloat(data.grand_total || 0).toLocaleString()}*\n\n` +
+        `🔗 ${trackLink}`;
+
+      if (adminPhone) {
+        await sendMessage(adminPhone, adminMsg);
+      }
+
+      // Notify customer
+      if (data.customer_phone) {
+        const custMsg =
+          `✅ *Order Confirmed!*\n\n` +
+          `Hi ${data.customer_name}! Your order has been placed.\n\n` +
+          `📦 Order: *${data.order_number}*\n\n` +
+          `${items}\n\n` +
+          `💰 *Total: Rs ${parseFloat(data.grand_total || 0).toLocaleString()}*\n` +
+          `💵 Payment: ${data.payment_mode || "Cash on Delivery"}\n\n` +
+          `🔗 Track your order:\n${trackLink}\n\n` +
+          `Thank you for shopping with ${shopName}! 🙏`;
+
+        await sendMessage(data.customer_phone, custMsg);
+      }
+
+      return res.json({ success: true, notified: "admin+customer" });
+    }
+
+    if (type === "order_status") {
+      const shopName = process.env.SHOP_NAME || "Sam's Skin Care";
+      const baseUrl = process.env.BASE_URL || "https://sams.g0vi.pk";
+      const trackLink = `${baseUrl}/track-order?order=${data.order_number}`;
+
+      const statusEmoji = {
+        "Order Booked": "📋",
+        "Confirmed": "✅",
+        "Processing": "⚙️",
+        "Shipped": "🚚",
+        "Out for Delivery": "🏃",
+        "Delivered": "✅",
+        "Cancelled": "❌",
+        "Returned": "↩️",
+      };
+      const emoji = statusEmoji[data.new_status] || "📦";
+
+      // Notify admin
+      const adminPhone = process.env.ADMIN_PHONE;
+      const adminMsg =
+        `${emoji} *Order Status Updated*\n\n` +
+        `📦 Order: *${data.order_number}*\n` +
+        `👤 ${data.customer_name}\n` +
+        `📱 ${data.customer_phone}\n` +
+        `🔄 Status: *${data.new_status}*\n\n` +
+        `🔗 ${trackLink}`;
+
+      if (adminPhone) {
+        await sendMessage(adminPhone, adminMsg);
+      }
+
+      // Notify customer
+      if (data.customer_phone) {
+        const custMsg =
+          `${emoji} *Order Update - ${shopName}*\n\n` +
+          `Hi ${data.customer_name}!\n\n` +
+          `Your order *${data.order_number}* status has been updated:\n\n` +
+          `🔄 *${data.new_status}*\n\n` +
+          `🔗 Track your order:\n${trackLink}`;
+
+        await sendMessage(data.customer_phone, custMsg);
+      }
+
+      return res.json({ success: true, notified: "admin+customer" });
+    }
+
+    res.status(400).json({ error: "Unknown notification type: " + type });
+  } catch (e) {
+    console.error("Notification error:", e.message);
+    res.status(500).json({ error: e.message });
   }
+});
+
+app.post("/disconnect", async (req, res) => {
+  try {
+    if (sock) await sock.logout();
+    if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    connectionStatus = "disconnected";
+    qrData = null;
+    setTimeout(connectWA, 1000);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/health", (req, res) => res.json({ status: "ok", wa: connectionStatus }));
+
+io.on("connection", (socket) => {
+  console.log("Socket client connected");
+  socket.emit("status", connectionStatus);
+  if (connectionStatus === "qr" && qrData) socket.emit("qr", qrData);
 });
 
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`WhatsApp server running on port ${PORT}`);
-  connectWhatsApp();
+  connectWA();
 });
