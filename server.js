@@ -21,7 +21,7 @@ const io = new SocketIO(httpServer, { cors: { origin: "*" } });
 
 let sock = null;
 let qrData = null;
-let connectionStatus = "disconnected"; // disconnected | connecting | connected
+let connectionStatus = "disconnected";
 
 const AUTH_DIR = "./auth_info";
 
@@ -35,10 +35,7 @@ async function connectWA() {
     logger: pino({ level: "silent" }),
     printQRInTerminal: false,
     browser: ["SAMS Server", "Chrome", "3.0"],
-    store,
   });
-
-  store.bind(sock.ev);
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -80,7 +77,6 @@ async function sendMessage(phone, message) {
   if (!sock || connectionStatus !== "connected") {
     throw new Error("WhatsApp not connected");
   }
-  // Normalize phone number → 92XXXXXXXXXX@s.whatsapp.net
   let num = phone.replace(/\D/g, "");
   if (num.startsWith("0")) num = "92" + num.slice(1);
   if (!num.startsWith("92")) num = "92" + num;
@@ -98,7 +94,6 @@ app.get("/status", (req, res) => {
   res.json({ status: connectionStatus });
 });
 
-// Send single message (used by frontend waApi.send)
 app.post("/send", async (req, res) => {
   const { phone, message } = req.body;
   if (!phone || !message) return res.status(400).json({ error: "phone and message required" });
@@ -111,18 +106,16 @@ app.post("/send", async (req, res) => {
   }
 });
 
-// Called by PHP backend index.php notifyWA()
 app.post("/send-notification", async (req, res) => {
   const { type, data } = req.body;
   if (!type || !data) return res.status(400).json({ error: "type and data required" });
 
   try {
-    if (type === "new_order") {
-      // Notify admin
-      const adminPhone = process.env.ADMIN_PHONE;
-      const shopName = process.env.SHOP_NAME || "Sam's Skin Care";
-      const baseUrl = process.env.BASE_URL || "https://sams.g0vi.pk";
+    const shopName = process.env.SHOP_NAME || "Sam's Skin Care";
+    const baseUrl = process.env.BASE_URL || "https://sams.g0vi.pk";
+    const adminPhone = process.env.ADMIN_PHONE;
 
+    if (type === "new_order") {
       const items = Array.isArray(data.items)
         ? data.items.map(i => `• ${i.product_name} x${i.qty} = Rs ${i.total}`).join("\n")
         : "—";
@@ -139,11 +132,8 @@ app.post("/send-notification", async (req, res) => {
         `💰 *Total: Rs ${parseFloat(data.grand_total || 0).toLocaleString()}*\n\n` +
         `🔗 ${trackLink}`;
 
-      if (adminPhone) {
-        await sendMessage(adminPhone, adminMsg);
-      }
+      if (adminPhone) await sendMessage(adminPhone, adminMsg);
 
-      // Notify customer
       if (data.customer_phone) {
         const custMsg =
           `✅ *Order Confirmed!*\n\n` +
@@ -154,7 +144,6 @@ app.post("/send-notification", async (req, res) => {
           `💵 Payment: ${data.payment_mode || "Cash on Delivery"}\n\n` +
           `🔗 Track your order:\n${trackLink}\n\n` +
           `Thank you for shopping with ${shopName}! 🙏`;
-
         await sendMessage(data.customer_phone, custMsg);
       }
 
@@ -162,24 +151,14 @@ app.post("/send-notification", async (req, res) => {
     }
 
     if (type === "order_status") {
-      const shopName = process.env.SHOP_NAME || "Sam's Skin Care";
-      const baseUrl = process.env.BASE_URL || "https://sams.g0vi.pk";
       const trackLink = `${baseUrl}/track-order?order=${data.order_number}`;
-
       const statusEmoji = {
-        "Order Booked": "📋",
-        "Confirmed": "✅",
-        "Processing": "⚙️",
-        "Shipped": "🚚",
-        "Out for Delivery": "🏃",
-        "Delivered": "✅",
-        "Cancelled": "❌",
-        "Returned": "↩️",
+        "Order Booked": "📋", "Confirmed": "✅", "Processing": "⚙️",
+        "Order Dispatched": "🚚", "Out for Delivery": "🏃",
+        "Order Delivered": "✅", "Cancelled": "❌", "Returned": "↩️",
       };
       const emoji = statusEmoji[data.new_status] || "📦";
 
-      // Notify admin
-      const adminPhone = process.env.ADMIN_PHONE;
       const adminMsg =
         `${emoji} *Order Status Updated*\n\n` +
         `📦 Order: *${data.order_number}*\n` +
@@ -188,26 +167,22 @@ app.post("/send-notification", async (req, res) => {
         `🔄 Status: *${data.new_status}*\n\n` +
         `🔗 ${trackLink}`;
 
-      if (adminPhone) {
-        await sendMessage(adminPhone, adminMsg);
-      }
+      if (adminPhone) await sendMessage(adminPhone, adminMsg);
 
-      // Notify customer
       if (data.customer_phone) {
         const custMsg =
           `${emoji} *Order Update - ${shopName}*\n\n` +
           `Hi ${data.customer_name}!\n\n` +
-          `Your order *${data.order_number}* status has been updated:\n\n` +
+          `Your order *${data.order_number}* status:\n\n` +
           `🔄 *${data.new_status}*\n\n` +
-          `🔗 Track your order:\n${trackLink}`;
-
+          `🔗 Track: ${trackLink}`;
         await sendMessage(data.customer_phone, custMsg);
       }
 
       return res.json({ success: true, notified: "admin+customer" });
     }
 
-    res.status(400).json({ error: "Unknown notification type: " + type });
+    res.status(400).json({ error: "Unknown type: " + type });
   } catch (e) {
     console.error("Notification error:", e.message);
     res.status(500).json({ error: e.message });
