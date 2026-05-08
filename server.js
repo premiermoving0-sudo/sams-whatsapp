@@ -47,7 +47,7 @@ async function connectWA() {
       connectionStatus = "qr";
       io.emit("qr", qrData);
       io.emit("status", "qr");
-      console.log("QR code generated");
+      console.log("✅ QR code generated");
     }
 
     if (connection === "close") {
@@ -67,12 +67,12 @@ async function connectWA() {
       qrData = null;
       connectionStatus = "connected";
       io.emit("status", "connected");
-      console.log("WhatsApp connected!");
+      console.log("✅ WhatsApp connected!");
     }
   });
 }
 
-// ── Helper: send a WhatsApp message ──────────────────────────
+// Helper: send a WhatsApp message
 async function sendMessage(phone, message) {
   if (!sock || connectionStatus !== "connected") {
     throw new Error("WhatsApp not connected");
@@ -85,8 +85,7 @@ async function sendMessage(phone, message) {
   console.log(`Message sent to ${jid}`);
 }
 
-// ── Routes ───────────────────────────────────────────────────
-
+// Routes
 app.get("/status", (req, res) => {
   if (connectionStatus === "qr" && qrData) {
     return res.json({ status: "qr", qr: qrData });
